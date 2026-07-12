@@ -36,6 +36,8 @@ type autoRedirect struct {
 	enableIPv6              bool
 	iptablesPath            string
 	ip6tablesPath           string
+	enablePreRouting4       bool
+	enablePreRouting6       bool
 	useNFTables             bool
 	androidSu               bool
 	suPath                  string
@@ -91,6 +93,30 @@ func (r *autoRedirect) Start() error {
 				return E.Extend(E.Cause(err, "root permission is required for auto redirect"), os.Getenv("PATH"))
 			}
 		}
+		if len(r.tunOptions.Inet6Address) > 0 {
+			r.ip6tablesPath = "/system/bin/ip6tables"
+			err = r.runShell(r.ip6tablesPath, "-t nat -nL OUTPUT")
+			if err != nil {
+				r.ip6tablesPath = ""
+				r.logger.Error("device has no ip6tables nat support: ", err)
+			} else {
+				r.enableIPv6 = true
+			}
+		}
+		err = r.runShell(r.iptablesPath, "-t nat -nL PREROUTING")
+		if err != nil {
+			r.logger.Warn("device has no iptables nat PREROUTING support: ", err)
+		} else {
+			r.enablePreRouting4 = true
+		}
+		if r.enableIPv6 {
+			err = r.runShell(r.ip6tablesPath, "-t nat -nL PREROUTING")
+			if err != nil {
+				r.logger.Warn("device has no ip6tables nat PREROUTING support: ", err)
+			} else {
+				r.enablePreRouting6 = true
+			}
+		}
 	} else {
 		if r.tunOptions.NetNs != "" && !r.useNFTables {
 			return E.New("auto_redirect in network namespace requires nftables")
@@ -130,10 +156,12 @@ func (r *autoRedirect) Start() error {
 	}
 	if r.customRedirectPort == 0 {
 		var listenAddr netip.Addr
-		if runtime.GOOS == "android" {
-			listenAddr = netip.AddrFrom4([4]byte{127, 0, 0, 1})
-		} else if r.enableIPv6 {
+		if r.enableIPv6 {
 			listenAddr = netip.IPv6Unspecified()
+		} else if runtime.GOOS == "android" && !r.enablePreRouting4 {
+			// REDIRECT in PREROUTING rewrites the destination to the primary
+			// address of the ingress interface, which never reaches a loopback listener.
+			listenAddr = netip.AddrFrom4([4]byte{127, 0, 0, 1})
 		} else {
 			listenAddr = netip.IPv4Unspecified()
 		}

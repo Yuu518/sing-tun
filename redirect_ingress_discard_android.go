@@ -40,10 +40,18 @@ type bpfObjectInfoAttribute struct {
 	info           uint64
 }
 
-func bpfObjectGet(path string) (int, error) {
+type bpfMapInfo struct {
+	mapType   uint32
+	id        uint32
+	keySize   uint32
+	valueSize uint32
+}
+
+func bpfObjectGet(path string) (int, bpfMapInfo, error) {
+	var info bpfMapInfo
 	pathBytes, err := unix.BytePtrFromString(path)
 	if err != nil {
-		return 0, err
+		return 0, info, err
 	}
 	var pinner runtime.Pinner
 	pinner.Pin(pathBytes)
@@ -51,13 +59,7 @@ func bpfObjectGet(path string) (int, error) {
 	attribute := bpfObjectAttribute{pathname: uint64(uintptr(unsafe.Pointer(pathBytes)))}
 	descriptor, _, errno := unix.Syscall(unix.SYS_BPF, unix.BPF_OBJ_GET, uintptr(unsafe.Pointer(&attribute)), unsafe.Sizeof(attribute))
 	if errno != 0 {
-		return 0, errno
-	}
-	var info struct {
-		mapType   uint32
-		id        uint32
-		keySize   uint32
-		valueSize uint32
+		return 0, info, errno
 	}
 	pinner.Pin(&info)
 	infoAttribute := bpfObjectInfoAttribute{
@@ -68,13 +70,21 @@ func bpfObjectGet(path string) (int, error) {
 	_, _, errno = unix.Syscall(unix.SYS_BPF, unix.BPF_OBJ_GET_INFO_BY_FD, uintptr(unsafe.Pointer(&infoAttribute)), unsafe.Sizeof(infoAttribute))
 	if errno != 0 {
 		unix.Close(int(descriptor))
-		return 0, errno
+		return 0, info, errno
+	}
+	return int(descriptor), info, nil
+}
+
+func openAndroidIngressDiscardMap() (int, error) {
+	descriptor, info, err := bpfObjectGet(androidIngressDiscardMapPath)
+	if err != nil {
+		return 0, err
 	}
 	if info.mapType != unix.BPF_MAP_TYPE_HASH || info.keySize != 16 || info.valueSize != 8 {
-		unix.Close(int(descriptor))
+		unix.Close(descriptor)
 		return 0, E.New("unexpected ingress discard map layout: type ", info.mapType, ", key ", info.keySize, ", value ", info.valueSize)
 	}
-	return int(descriptor), nil
+	return descriptor, nil
 }
 
 func bpfMapCall(command uintptr, mapDescriptor int, key []byte, value []byte, flags uint64) error {
@@ -108,7 +118,7 @@ func (r *autoRedirect) removeAndroidIngressDiscardRulesLocked() error {
 	if err != nil {
 		return E.Cause(err, "stat ingress discard map")
 	}
-	mapDescriptor, err := bpfObjectGet(androidIngressDiscardMapPath)
+	mapDescriptor, err := openAndroidIngressDiscardMap()
 	if err != nil {
 		if err == unix.ENOENT {
 			return nil
@@ -158,7 +168,7 @@ func (r *autoRedirect) restoreAndroidIngressDiscardRulesLocked() {
 	if err != nil {
 		return
 	}
-	mapDescriptor, err := bpfObjectGet(androidIngressDiscardMapPath)
+	mapDescriptor, err := openAndroidIngressDiscardMap()
 	if err != nil {
 		r.logger.Error("restore ingress discard rules: open map: ", err)
 		return

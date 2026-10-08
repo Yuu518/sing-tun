@@ -269,13 +269,30 @@ func (r *autoRedirect) tproxyEnabled() bool {
 	return !r.useNFTables && r.enableIPv6 && (!r.androidVPNService || r.customRedirectTransparent)
 }
 
-func (r *autoRedirect) prepareCustomTransparentListener() error {
+func (r *autoRedirect) prepareCustomListener() error {
 	fd, err := r.customRedirectListenerFD()
 	if err != nil {
 		return err
 	}
 	defer syscall.Close(fd)
-	err = syscall.SetsockoptInt(fd, syscall.SOL_IPV6, unix.IPV6_TRANSPARENT, 1)
+	err = r.allowAndroidLoopbackAccess(fd)
+	if err != nil {
+		r.logger.Warn("apps of other users may lose TCP connectivity: allow loopback access: ", err)
+	}
+	if r.useNFTables || !r.enableIPv6 {
+		return nil
+	}
+	err = r.prepareCustomTransparentListener(fd)
+	if err != nil {
+		r.logger.Warn("IPv6 TCP falls back to the tun stack: prepare transparent listener: ", err)
+		return nil
+	}
+	r.customRedirectTransparent = true
+	return nil
+}
+
+func (r *autoRedirect) prepareCustomTransparentListener(fd int) error {
+	err := syscall.SetsockoptInt(fd, syscall.SOL_IPV6, unix.IPV6_TRANSPARENT, 1)
 	if err != nil {
 		return E.Cause(err, "set IPV6_TRANSPARENT")
 	}
@@ -291,12 +308,10 @@ func (r *autoRedirect) startRedirectServer() error {
 		r.customRedirectPort = r.customRedirectPortFunc()
 	}
 	if r.customRedirectPort > 0 {
-		if !r.useNFTables && r.enableIPv6 && r.androidVPNService && r.customRedirectListenerFD != nil {
-			err := r.prepareCustomTransparentListener()
+		if r.androidVPNService && r.customRedirectListenerFD != nil {
+			err := r.prepareCustomListener()
 			if err != nil {
-				r.logger.Warn("IPv6 TCP falls back to the tun stack: prepare transparent listener: ", err)
-			} else {
-				r.customRedirectTransparent = true
+				r.logger.Warn("prepare redirect listener: ", err)
 			}
 		}
 		return nil
